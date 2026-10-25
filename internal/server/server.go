@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/zstd"
 	"github.com/niwoerner/otelake/internal/config"
 )
 
@@ -61,10 +63,39 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// readBody reads the request body up to the configured limit and writes the
-// error response if that fails.
+// readBody reads the request body, decompressing it according to
+// Content-Encoding. The size limit applies before and after decompression.
 func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.HTTP.MaxBodyBytes))
+	limit := s.cfg.HTTP.MaxBodyBytes
+	body := http.MaxBytesReader(w, r.Body, limit)
+
+	var reader io.Reader
+	switch r.Header.Get("Content-Encoding") {
+	case "", "identity":
+		reader = body
+	case "gzip":
+		gz, err := gzip.NewReader(body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return nil, false
+		}
+		defer func() { _ = gz.Close() }()
+		reader = gz
+	case "zstd":
+		zr, err := zstd.NewReader(body, zstd.WithDecoderMaxMemory(uint64(limit)))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return nil, false
+		}
+		defer zr.Close()
+		reader = zr
+	default:
+		http.Error(w, "unsupported Content-Encoding", http.StatusUnsupportedMediaType)
+		return nil, false
+	}
+
+	// Read one byte past the limit to detect an oversized decompressed body.
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
 	if err != nil {
 		status := http.StatusBadRequest
 		var tooLarge *http.MaxBytesError
@@ -74,5 +105,9 @@ func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool)
 		http.Error(w, err.Error(), status)
 		return nil, false
 	}
-	return body, true
+	if int64(len(data)) > limit {
+		http.Error(w, "decompressed body too large", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	return data, true
 }
