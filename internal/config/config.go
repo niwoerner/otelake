@@ -2,7 +2,8 @@ package config
 
 const (
 	defaultHTTPAddress  = ":4318"
-	defaultMaxBodyBytes = 67108864 // 64 MiB, the OTLP spec's recommended default
+	defaultMaxBodyBytes = 67108864   // 64 MiB, the OTLP spec's recommended default
+	defaultMemoryLimit  = 1073741824 // 1 GiB for requests being decoded, flattened and queued
 
 	defaultStorageType = "local"
 	defaultLocalDir    = "data"
@@ -18,6 +19,9 @@ type Config struct {
 type HTTPConfig struct {
 	Address      string
 	MaxBodyBytes int64
+	// MemoryLimitBytes bounds the memory of all requests in flight; requests
+	// beyond it get 429 and are retried by the client.
+	MemoryLimitBytes int64
 }
 
 // StorageConfig selects where Parquet files are stored: "local" or "s3".
@@ -45,8 +49,9 @@ type S3Config struct {
 func NewConfig() *Config {
 	return &Config{
 		HTTP: HTTPConfig{
-			Address:      defaultHTTPAddress,
-			MaxBodyBytes: defaultMaxBodyBytes,
+			Address:          defaultHTTPAddress,
+			MaxBodyBytes:     defaultMaxBodyBytes,
+			MemoryLimitBytes: defaultMemoryLimit,
 		},
 		Storage: StorageConfig{
 			Type:  defaultStorageType,

@@ -15,9 +15,11 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/niwoerner/otelake/internal/logs"
 	"github.com/niwoerner/otelake/internal/schemas"
 	"github.com/niwoerner/otelake/internal/traces"
 	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 )
 
@@ -72,7 +74,7 @@ func newWriter(t *testing.T, bucket *memBucket) (*Writer, memory.Allocator) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	t.Cleanup(func() { mem.AssertSize(t, 0) })
 
-	w := New(bucket, schemas.Spans, "spans", "start_time", "service_name")
+	w := New(bucket, schemas.Spans, "spans", []string{"start_time"}, "service_name")
 	w.mem = mem
 	return w, mem
 }
@@ -195,5 +197,29 @@ func TestFailedWriteRollsBackStoredFiles(t *testing.T) {
 	}
 	if keys := bucket.keys(); len(keys) != 0 {
 		t.Errorf("objects left after failed write: %v", keys)
+	}
+}
+
+func TestWriteFallsBackToTheNextTimeColumn(t *testing.T) {
+	bucket := newMemBucket()
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	w := New(bucket, schemas.Logs, "logs", []string{"time", "observed_time"}, "service_name")
+	w.mem = mem
+
+	ld := plog.NewLogs()
+	lr := ld.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+	lr.SetObservedTimestamp(pcommon.NewTimestampFromTime(hour14.Add(5 * time.Minute))) // time unset
+	rec, err := logs.Flatten(mem, ld)
+	if err != nil {
+		t.Fatalf("Flatten: %v", err)
+	}
+	defer rec.Release()
+
+	if err := w.Write([]arrow.RecordBatch{rec}, hour14.Add(3*time.Hour)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if keys := bucket.keys(); len(keys) != 1 || !strings.HasPrefix(keys[0], "logs/hour=2026102514/") {
+		t.Errorf("keys = %v, want the observed hour 14, not the hour of now", keys)
 	}
 }

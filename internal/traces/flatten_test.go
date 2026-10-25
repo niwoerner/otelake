@@ -5,7 +5,8 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/niwoerner/otelake/internal/flatten"
+	"github.com/niwoerner/otelake/internal/flatten/flattentest"
 	"github.com/niwoerner/otelake/internal/schemas"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
@@ -73,12 +74,9 @@ func testTraces() ptrace.Traces {
 	return td
 }
 
-func flatten(t *testing.T, td ptrace.Traces) arrow.RecordBatch {
+func flattenTraces(t *testing.T, td ptrace.Traces) arrow.RecordBatch {
 	t.Helper()
-	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
-	t.Cleanup(func() { mem.AssertSize(t, 0) })
-
-	rec, err := Flatten(mem, td)
+	rec, err := Flatten(flattentest.Allocator(t), td)
 	if err != nil {
 		t.Fatalf("Flatten: %v", err)
 	}
@@ -86,36 +84,8 @@ func flatten(t *testing.T, td ptrace.Traces) arrow.RecordBatch {
 	return rec
 }
 
-func column[T arrow.Array](t *testing.T, rec arrow.RecordBatch, name string) T {
-	t.Helper()
-	idx := rec.Schema().FieldIndices(name)
-	if len(idx) == 0 {
-		t.Fatalf("no column %q", name)
-	}
-	return rec.Column(idx[0]).(T)
-}
-
-func dictValue(t *testing.T, rec arrow.RecordBatch, name string, row int) string {
-	t.Helper()
-	d := column[*array.Dictionary](t, rec, name)
-	return d.Dictionary().(*array.String).Value(d.GetValueIndex(row))
-}
-
-// mapEntries returns the key/value pairs of one row of a map column.
-func mapEntries(t *testing.T, rec arrow.RecordBatch, name string, row int) map[string]any {
-	t.Helper()
-	m := column[*array.Map](t, rec, name)
-	start, end := m.ValueOffsets(row)
-	keys := m.Keys().(*array.String)
-	entries := map[string]any{}
-	for i := int(start); i < int(end); i++ {
-		entries[keys.Value(i)] = m.Items().GetOneForMarshal(i)
-	}
-	return entries
-}
-
 func TestFlattenMatchesSchema(t *testing.T) {
-	rec := flatten(t, testTraces())
+	rec := flattenTraces(t, testTraces())
 
 	if !rec.Schema().Equal(schemas.Spans) {
 		t.Fatalf("schema differs:\n got %v\nwant %v", rec.Schema(), schemas.Spans)
@@ -126,72 +96,72 @@ func TestFlattenMatchesSchema(t *testing.T) {
 }
 
 func TestFlattenCopiesResourceAndScope(t *testing.T) {
-	rec := flatten(t, testTraces())
+	rec := flattenTraces(t, testTraces())
 
 	for row := range 2 {
-		if got := dictValue(t, rec, "service_name", row); got != "checkout" {
+		if got := flattentest.Dict(t, rec, "service_name", row); got != "checkout" {
 			t.Errorf("row %d service_name = %q", row, got)
 		}
-		if got := dictValue(t, rec, "scope_name", row); got != "http" {
+		if got := flattentest.Dict(t, rec, "scope_name", row); got != "http" {
 			t.Errorf("row %d scope_name = %q", row, got)
 		}
-		if got := mapEntries(t, rec, "resource_attrs_int", row)["process.pid"]; got != int64(42) {
+		if got := flattentest.Map(t, rec, "resource_attrs_int", row)["process.pid"]; got != int64(42) {
 			t.Errorf("row %d resource process.pid = %v", row, got)
 		}
-		if got := mapEntries(t, rec, "scope_attrs_bool", row)["scope.enabled"]; got != true {
+		if got := flattentest.Map(t, rec, "scope_attrs_bool", row)["scope.enabled"]; got != true {
 			t.Errorf("row %d scope.enabled = %v", row, got)
 		}
 	}
-	if got := column[*array.Uint32](t, rec, "resource_dropped_attributes_count").Value(0); got != 1 {
+	if got := flattentest.Column[*array.Uint32](t, rec, "resource_dropped_attributes_count").Value(0); got != 1 {
 		t.Errorf("resource_dropped_attributes_count = %d", got)
 	}
-	refs := column[*array.List](t, rec, "resource_entity_refs")
+	refs := flattentest.Column[*array.List](t, rec, "resource_entity_refs")
 	if start, end := refs.ValueOffsets(0); end-start != 1 {
 		t.Errorf("entity refs = %d, want 1", end-start)
 	}
 }
 
 func TestFlattenSpanFields(t *testing.T) {
-	rec := flatten(t, testTraces())
+	rec := flattenTraces(t, testTraces())
 
-	ids := column[*array.FixedSizeBinary](t, rec, "trace_id")
+	ids := flattentest.Column[*array.FixedSizeBinary](t, rec, "trace_id")
 	if got := pcommon.TraceID(ids.Value(0)); got != traceID {
 		t.Errorf("trace_id = %v", got)
 	}
-	parents := column[*array.FixedSizeBinary](t, rec, "parent_span_id")
+	parents := flattentest.Column[*array.FixedSizeBinary](t, rec, "parent_span_id")
 	if !parents.IsNull(0) {
 		t.Error("empty parent_span_id must be null")
 	}
 	if got := pcommon.SpanID(parents.Value(1)); got != spanID {
 		t.Errorf("child parent_span_id = %v", got)
 	}
-	if got := column[*array.String](t, rec, "trace_state").Value(0); got != "vendor=value" {
+	if got := flattentest.Column[*array.String](t, rec, "trace_state").Value(0); got != "vendor=value" {
 		t.Errorf("trace_state = %q", got)
 	}
-	if got := column[*array.Int8](t, rec, "kind").Value(0); got != int8(ptrace.SpanKindServer) {
+	if got := flattentest.Column[*array.Int8](t, rec, "kind").Value(0); got != int8(ptrace.SpanKindServer) {
 		t.Errorf("kind = %d", got)
 	}
 
-	durations := column[*array.Int64](t, rec, "duration_ns")
+	durations := flattentest.Column[*array.Int64](t, rec, "duration_ns")
 	if got := durations.Value(0); got != 2_000 {
 		t.Errorf("duration_ns = %d, want 2000", got)
 	}
 	if got := durations.Value(1); got != 0 {
 		t.Errorf("negative duration_ns = %d, want 0", got)
 	}
-	if got := column[*array.Timestamp](t, rec, "end_time").Value(1); got != 1_500 {
+	if got := flattentest.Column[*array.Timestamp](t, rec, "end_time").Value(1); got != 1_500 {
 		t.Errorf("end_time kept as sent = %d, want 1500", got)
 	}
-	if got := column[*array.Int8](t, rec, "status_code").Value(1); got != int8(ptrace.StatusCodeError) {
+	if got := flattentest.Column[*array.Int8](t, rec, "status_code").Value(1); got != int8(ptrace.StatusCodeError) {
 		t.Errorf("status_code = %d", got)
 	}
-	if got := column[*array.String](t, rec, "status_message").Value(1); got != "timeout" {
+	if got := flattentest.Column[*array.String](t, rec, "status_message").Value(1); got != "timeout" {
 		t.Errorf("status_message = %q", got)
 	}
 }
 
 func TestFlattenSplitsAttributesByType(t *testing.T) {
-	rec := flatten(t, testTraces())
+	rec := flattenTraces(t, testTraces())
 
 	want := map[string]map[string]any{
 		"attrs_str":   {"http.route": "/cart"},
@@ -202,7 +172,7 @@ func TestFlattenSplitsAttributesByType(t *testing.T) {
 		"attrs_any":   {"tags": `{"arrayValue":{"values":[{"stringValue":"a"}]}}`, "unset": `{}`},
 	}
 	for col, entries := range want {
-		got := mapEntries(t, rec, col, 0)
+		got := flattentest.Map(t, rec, col, 0)
 		if len(got) != len(entries) {
 			t.Errorf("%s = %v, want %v", col, got, entries)
 			continue
@@ -222,9 +192,9 @@ func TestFlattenSplitsAttributesByType(t *testing.T) {
 }
 
 func TestFlattenEventsAndLinks(t *testing.T) {
-	rec := flatten(t, testTraces())
+	rec := flattenTraces(t, testTraces())
 
-	events := column[*array.List](t, rec, "events")
+	events := flattentest.Column[*array.List](t, rec, "events")
 	if start, end := events.ValueOffsets(0); end-start != 1 {
 		t.Fatalf("root events = %d, want 1", end-start)
 	}
@@ -236,7 +206,7 @@ func TestFlattenEventsAndLinks(t *testing.T) {
 		t.Errorf("event name = %q", got)
 	}
 
-	links := column[*array.List](t, rec, "links")
+	links := flattentest.Column[*array.List](t, rec, "links")
 	link := links.ListValues().(*array.Struct)
 	if got := pcommon.SpanID(link.Field(1).(*array.FixedSizeBinary).Value(0)); got != childID {
 		t.Errorf("link span_id = %v", got)
@@ -247,12 +217,12 @@ func TestFlattenDefaultsMissingServiceName(t *testing.T) {
 	td := ptrace.NewTraces()
 	td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
 
-	rec := flatten(t, td)
+	rec := flattenTraces(t, td)
 
-	if got := dictValue(t, rec, "service_name", 0); got != unknownService {
-		t.Errorf("service_name = %q, want %q", got, unknownService)
+	if got := flattentest.Dict(t, rec, "service_name", 0); got != flatten.UnknownService {
+		t.Errorf("service_name = %q, want %q", got, flatten.UnknownService)
 	}
-	if !column[*array.FixedSizeBinary](t, rec, "trace_id").IsNull(0) {
+	if !flattentest.Column[*array.FixedSizeBinary](t, rec, "trace_id").IsNull(0) {
 		t.Error("empty trace_id must be null")
 	}
 }

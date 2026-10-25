@@ -21,3 +21,9 @@ func writeResponse(w http.ResponseWriter, body []byte) {
 	w.Header().Set("Content-Type", "application/x-protobuf")
 	_, _ = w.Write(body)
 }
+
+// writeBusy answers 429 with Retry-After, which OTLP clients retry later.
+func writeBusy(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	writeError(w, "server busy, retry later", http.StatusTooManyRequests)
+}

@@ -12,13 +12,23 @@ var (
 	i32 = arrow.PrimitiveTypes.Int32
 )
 
+// Values of the metrics "type" column. They are part of the stored contract, so
+// they never change, independent of any library's enum.
+const (
+	MetricTypeGauge                int8 = 1
+	MetricTypeSum                  int8 = 2
+	MetricTypeHistogram            int8 = 3
+	MetricTypeExponentialHistogram int8 = 4
+	MetricTypeSummary              int8 = 5
+)
+
 // One row per data point; columns of other data point types are null.
 var Metrics = otlpArrowSchema(resourceAndScope(), []arrow.Field{
 	{Name: "name", Type: dictString},
 	{Name: "description", Type: dictString},
 	{Name: "unit", Type: dictString},
 }, attributes("metadata_"), []arrow.Field{
-	{Name: "type", Type: arrow.PrimitiveTypes.Int8}, // gauge, sum, histogram, exponential_histogram, summary
+	{Name: "type", Type: arrow.PrimitiveTypes.Int8}, // one of the MetricType constants
 	{Name: "temporality", Type: arrow.PrimitiveTypes.Int8},
 	{Name: "is_monotonic", Type: arrow.FixedWidthTypes.Boolean},
 }, attributes(""), []arrow.Field{

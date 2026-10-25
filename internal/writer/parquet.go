@@ -31,23 +31,25 @@ const (
 // hour: <prefix>/hour=YYYYMMDDHH/<file>.parquet, rows sorted by the sort
 // column, then event time.
 type Writer struct {
-	bucket     storage.Bucket
-	schema     *arrow.Schema
-	prefix     string // e.g. "spans"
-	timeColumn string // event time, used for the hour partition and sorting
-	sortColumn string // dictionary-encoded string column sorted before time
-	mem        memory.Allocator
-	seq        atomic.Uint64
+	bucket      storage.Bucket
+	schema      *arrow.Schema
+	prefix      string   // e.g. "spans"
+	timeColumns []string // event time candidates in order, e.g. time, then observed_time
+	sortColumn  string   // dictionary-encoded string column sorted before time
+	mem         memory.Allocator
+	seq         atomic.Uint64
 }
 
-func New(bucket storage.Bucket, schema *arrow.Schema, prefix, timeColumn, sortColumn string) *Writer {
+// New writes files below prefix. A row's event time, which picks its hour and
+// sort position, is the first of timeColumns holding a valid time.
+func New(bucket storage.Bucket, schema *arrow.Schema, prefix string, timeColumns []string, sortColumn string) *Writer {
 	return &Writer{
-		bucket:     bucket,
-		schema:     schema,
-		prefix:     prefix,
-		timeColumn: timeColumn,
-		sortColumn: sortColumn,
-		mem:        memory.DefaultAllocator,
+		bucket:      bucket,
+		schema:      schema,
+		prefix:      prefix,
+		timeColumns: timeColumns,
+		sortColumn:  sortColumn,
+		mem:         memory.DefaultAllocator,
 	}
 }
 
@@ -71,8 +73,9 @@ func (w *Writer) Write(recs []arrow.RecordBatch, now time.Time) (err error) {
 		}
 	}()
 
-	for hour, rows := range w.rowsByHour(all, now) {
-		w.sortRows(all, rows)
+	times := w.eventTimes(all, now)
+	for hour, rows := range rowsByHour(times) {
+		w.sortRows(all, rows, times)
 		part, err := w.take(ctx, all, rows)
 		if err != nil {
 			return fmt.Errorf("selecting rows of hour %s: %w", hour, err)
@@ -138,34 +141,48 @@ func (w *Writer) concat(recs []arrow.RecordBatch) (arrow.RecordBatch, error) {
 	return array.NewRecordBatch(w.schema, cols, rows), nil
 }
 
-// rowsByHour groups row indices by event hour, formatted YYYYMMDDHH (UTC).
-// Rows without a valid event time (unset, or more than maxFutureSkew ahead)
-// go to the hour of now, so they don't end up in bogus partitions.
-func (w *Writer) rowsByHour(rec arrow.RecordBatch, now time.Time) map[string][]int32 {
-	times := rec.Column(w.schema.FieldIndices(w.timeColumn)[0]).(*array.Timestamp)
+// eventTimes returns each row's event time: the first time column holding a
+// valid time, or now when none does (unset, or more than maxFutureSkew ahead),
+// so rows don't end up in bogus partitions.
+func (w *Writer) eventTimes(rec arrow.RecordBatch, now time.Time) []int64 {
+	cols := make([]*array.Timestamp, len(w.timeColumns))
+	for i, name := range w.timeColumns {
+		cols[i] = rec.Column(w.schema.FieldIndices(name)[0]).(*array.Timestamp)
+	}
 	latest := now.Add(maxFutureSkew).UnixNano()
-	hours := map[string][]int32{}
-	for i, ts := range times.Values() {
-		t := int64(ts)
-		if t <= 0 || t > latest {
-			t = now.UnixNano()
+
+	times := make([]int64, rec.NumRows())
+	for row := range times {
+		times[row] = now.UnixNano()
+		for _, col := range cols {
+			if t := int64(col.Value(row)); t > 0 && t <= latest {
+				times[row] = t
+				break
+			}
 		}
+	}
+	return times
+}
+
+// rowsByHour groups row indices by event hour, formatted YYYYMMDDHH (UTC).
+func rowsByHour(times []int64) map[string][]int32 {
+	hours := map[string][]int32{}
+	for row, t := range times {
 		hour := time.Unix(0, t/nsPerHour*nsPerHour).UTC().Format("2006010215")
-		hours[hour] = append(hours[hour], int32(i))
+		hours[hour] = append(hours[hour], int32(row))
 	}
 	return hours
 }
 
 // sortRows orders row indices by the sort column, then event time.
-func (w *Writer) sortRows(rec arrow.RecordBatch, rows []int32) {
+func (w *Writer) sortRows(rec arrow.RecordBatch, rows []int32, times []int64) {
 	keys := rec.Column(w.schema.FieldIndices(w.sortColumn)[0]).(*array.Dictionary)
 	names := keys.Dictionary().(*array.String)
-	times := rec.Column(w.schema.FieldIndices(w.timeColumn)[0]).(*array.Timestamp)
 
 	slices.SortStableFunc(rows, func(x, y int32) int {
 		return cmp.Or(
 			cmp.Compare(names.Value(keys.GetValueIndex(int(x))), names.Value(keys.GetValueIndex(int(y)))),
-			cmp.Compare(times.Value(int(x)), times.Value(int(y))),
+			cmp.Compare(times[x], times[y]),
 		)
 	})
 }
