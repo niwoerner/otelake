@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+SECONDS=0
+version="$(awk '$1 == "go" { print $2 }' go.mod)"
+echo "Preparing Go $version"
+if [[ ! -x /usr/local/go/bin/go ]] || [[ "$(GOTOOLCHAIN=local /usr/local/go/bin/go version)" != *" go$version "* ]]; then
+  case "$(uname -m)" in
+    x86_64) arch=amd64 ;;
+    aarch64) arch=arm64 ;;
+    *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+  esac
+  archive="go${version}.linux-${arch}.tar.gz"
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  curl -fsSL 'https://go.dev/dl/?mode=json&include=all' -o "$temp_dir/releases.json"
+  checksum="$(python3 - "$temp_dir/releases.json" "$archive" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as releases:
+    print(next(file["sha256"] for release in json.load(releases)
+               for file in release["files"] if file["filename"] == sys.argv[2]))
+PY
+  )"
+  curl -fsSL "https://go.dev/dl/$archive" -o "$temp_dir/$archive"
+  echo "$checksum  $temp_dir/$archive" | sha256sum --check
+  tar -xzf "$temp_dir/$archive" -C "$temp_dir"
+  rm -rf /usr/local/go
+  mv "$temp_dir/go" /usr/local/go
+fi
+ln -sf /usr/local/go/bin/go /usr/local/bin/go
+ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+export PATH="/usr/local/bin:$PATH"
+go version
+echo "Toolchain ready after ${SECONDS}s"
+
+echo "Downloading modules and warming the build cache"
+go mod download
+go build ./...
+echo "Setup finished in ${SECONDS}s"
