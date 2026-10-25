@@ -30,7 +30,10 @@ var rootCmd = &cobra.Command{
 		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
-		srv := server.New(config.NewConfig(), logger)
+		srv, err := server.New(config.NewConfig(), logger)
+		if err != nil {
+			return fmt.Errorf("creating otelake: %w", err)
+		}
 
 		defer func() {
 			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownBudget)
