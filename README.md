@@ -46,3 +46,7 @@ Health: `curl localhost:4318/health` · Test data: `telemetrygen traces --otlp-h
 ## Deployment
 
 Docker container with config file
+
+## Benchmarks
+
+See [BENCHMARKS.md](BENCHMARKS.md) for ingestion results, methodology and run commands.
