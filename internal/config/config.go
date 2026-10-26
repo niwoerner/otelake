@@ -1,6 +1,10 @@
 package config
 
-import "time"
+import (
+	"os"
+	"strings"
+	"time"
+)
 
 const (
 	defaultHTTPAddress  = ":4318"
@@ -16,7 +20,7 @@ type Config struct {
 	HTTP    HTTPConfig
 	Storage StorageConfig
 	Query   QueryConfig
-	// Keys are configured in NewConfig for now. Empty lists deny access.
+	// Keys are loaded from OTELAKE_INGEST_KEYS. Empty keys deny access.
 	IngestKeys []string
 	// ReadKeys grant retrieval access, not ingestion access.
 	ReadKeys []string
@@ -61,9 +65,9 @@ type S3Config struct {
 }
 
 func NewConfig() *Config {
-	return &Config{
-		IngestKeys: []string{},
-		ReadKeys:   []string{},
+	cfg := &Config{
+		IngestKeys: strings.Split(os.Getenv("OTELAKE_INGEST_KEYS"), ","),
+		ReadKeys:   strings.Split(os.Getenv("OTELAKE_READ_KEYS"), ","),
 		HTTP: HTTPConfig{
 			Address:          defaultHTTPAddress,
 			MaxBodyBytes:     defaultMaxBodyBytes,
@@ -79,4 +83,10 @@ func NewConfig() *Config {
 			MemoryLimitBytes: 256 << 20,
 		},
 	}
+	for _, keys := range [][]string{cfg.IngestKeys, cfg.ReadKeys} {
+		for i := range keys {
+			keys[i] = strings.TrimSpace(keys[i])
+		}
+	}
+	return cfg
 }

@@ -103,14 +103,15 @@ errors are plain text except auth failures, which retain the OTLP protobuf
 
 ## Run
 
-Set `IngestKeys` and `ReadKeys` in `internal/config/config.go`'s `NewConfig` before building.
-Keys are source-configured for development only; do not commit production secrets.
-Empty key lists deny access. Read keys do not grant ingestion access.
+Set `OTELAKE_INGEST_KEYS` (write access) and `OTELAKE_READ_KEYS` (query access)
+in the runtime environment. Each accepts a comma-separated list for key rotation;
+whitespace around keys is trimmed. Unset or empty values deny access.
+Read keys do not grant ingestion access. Do not commit secrets.
 Building requires CGO and a C/C++ toolchain for embedded DuckDB.
 
 ```bash
 go build -o bin/otelake .
-./bin/otelake
+OTELAKE_INGEST_KEYS='<write-secret>' OTELAKE_READ_KEYS='<read-secret>' ./bin/otelake
 ```
 
 Health: `curl localhost:4318/health` (no authentication required).
@@ -130,7 +131,8 @@ telemetrygen traces --otlp-http --otlp-insecure --otlp-endpoint localhost:4318 \
 
 The Docker image builds with CGO on Debian and includes DuckDB's native runtime
 dependencies. Multi-platform releases build natively per target (with QEMU in
-CI). Configuration is currently compiled from `config.go`, not loaded from a file.
+CI). Authentication keys are loaded from environment variables at startup;
+other configuration is currently compiled from `config.go`, not loaded from a file.
 When using local storage, mount a directory writable by the container's UID 10001
 and set `Storage.Local.Dir` to that mount path.
 
