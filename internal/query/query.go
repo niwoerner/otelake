@@ -68,7 +68,7 @@ func (e *Engine) Query(ctx context.Context, statement string) (Result, error) {
 	if err != nil {
 		return result, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	for _, signal := range []string{"spans", "logs", "metrics"} {
 		pattern := filepath.Join(e.dir, signal, "hour=*", "*.parquet")
 		files, err := filepath.Glob(pattern)
@@ -93,7 +93,7 @@ func (e *Engine) Query(ctx context.Context, statement string) (Result, error) {
 	if err != nil {
 		return result, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	result.Columns, err = rows.Columns()
 	if err != nil {
 		return result, err

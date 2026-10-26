@@ -404,8 +404,8 @@ func TestQueryResultLimits(t *testing.T) {
 func TestQueryConcurrencyDoesNotBlockIngestion(t *testing.T) {
 	s, _ := newTestServer(t)
 	reader, writer := io.Pipe()
-	defer reader.Close()
-	defer writer.Close()
+	defer func() { _ = reader.Close() }()
+	defer func() { _ = writer.Close() }()
 	req := httptest.NewRequest("POST", "/api/query", reader)
 	req.Header.Set("Authorization", "Bearer test-read-key")
 	req.Header.Set("Content-Type", "application/json")
@@ -421,7 +421,9 @@ func TestQueryConcurrencyDoesNotBlockIngestion(t *testing.T) {
 	if resp := post(s, nil); resp.Code != 200 {
 		t.Errorf("ingest during query: %d", resp.Code)
 	}
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -494,7 +496,7 @@ func TestQuerySlowBodyDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -506,7 +508,7 @@ func TestQuerySlowBodyDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 504 {
 		t.Errorf("slow body status %d, want 504", resp.StatusCode)
 	}
@@ -529,7 +531,7 @@ func TestQuerySlowReaderReleasesSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if err := conn.SetReadBuffer(1024); err != nil {
 		t.Fatal(err)
 	}
@@ -564,7 +566,7 @@ func TestQueryWriteDeadlineAllowsConnectionReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -579,7 +581,9 @@ func TestQueryWriteDeadlineAllowsConnectionReuse(t *testing.T) {
 		t.Fatal(err)
 	}
 	data, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	if closeErr := resp.Body.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
 	if err != nil || resp.StatusCode != 200 || string(data) != `{"columns":["answer"],"rows":[[42]],"truncated":false}` {
 		t.Fatalf("query response: %d %s, error %v", resp.StatusCode, data, err)
 	}
@@ -592,7 +596,7 @@ func TestQueryWriteDeadlineAllowsConnectionReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err = io.ReadAll(resp.Body)
 	if err != nil || resp.StatusCode != 200 || string(data) != "ok" {
 		t.Fatalf("reused connection: %d %s, error %v", resp.StatusCode, data, err)
