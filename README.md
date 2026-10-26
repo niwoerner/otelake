@@ -4,10 +4,12 @@ An experiment of building an observability backend for agents with agents.
 
 ## What
 
-An open-source, self-hosted OpenTelemetry backend optimized for **agent retrieval**: agents (and humans) query telemetry via SQL and MCP.
+An open-source, self-hosted OpenTelemetry backend targeting **agent retrieval**.
+Today it supports OTLP ingestion and SQL queries over local telemetry through
+HTTP. An MCP interface is planned.
 
 Goals: no acked data lost · one container, near-zero config · compact, reproducible query results.
-Non-goals (for now): OTel Arrow ingest, auth, multi-tenancy, dashboards.
+Non-goals (for now): OTel Arrow ingest, multi-tenancy, dashboards.
 
 ## Core Concepts
 
@@ -32,20 +34,109 @@ Files are immutable, one folder per signal and event hour: `spans/hour=YYYYMMDDH
 
 ### Retrieval
 
-SQL or MCP. Query engine open: DuckDB (via go-duckdb) is the main candidate.
+`POST /api/query` accepts `{"sql":"SELECT ..."}` on the existing HTTP server
+(`:4318`). Embedded DuckDB queries local Parquet files directly through the
+`spans`, `logs`, and `metrics` views. Retrieval requires a `ReadKeys` bearer
+credential; ingest keys cannot read. S3 ingestion remains supported, but
+retrieval with S3 storage returns `503`.
+
+```bash
+curl -sS localhost:4318/api/query \
+  -H 'Authorization: Bearer <configured-read-key>' \
+  -H 'Content-Type: application/json' \
+  -d '{"sql":"SELECT service_name, count(*) AS errors FROM spans WHERE status_code = 2 GROUP BY service_name ORDER BY errors DESC"}'
+```
+
+Example response:
+
+```json
+{"columns":["service_name","errors"],"rows":[["checkout",12]],"truncated":false}
+```
+
+Use SQL for time filters, trace lookup, attributes, joins, and aggregations;
+there is no separate filter language or discovery API. For example:
+
+```sql
+SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'spans';
+SELECT name, duration_ns / 1e6 AS duration_ms FROM spans
+WHERE start_time >= TIMESTAMPTZ '2026-10-26 12:00:00+00'
+  AND start_time < TIMESTAMPTZ '2026-10-26 13:00:00+00'
+ORDER BY duration_ns DESC LIMIT 20;
+SELECT body_str FROM logs WHERE attrs_str['http.route'] = '/cart';
+SELECT name, avg(value_f64) FROM metrics GROUP BY name;
+```
+
+Send **one SELECT per request**, including CTEs. DuckDB's `query()` function
+rejects multiple statements and non-SELECT commands; SQL is passed as a bound
+value, not interpolated. Views expose the stored columns without signal-specific
+conversion. Timestamps are DuckDB strings with nanosecond precision; use
+`epoch_ns(start_time)` for integer nanoseconds and `hex(trace_id)` for readable
+IDs. Maps and lists become JSON objects and arrays; missing values stay null.
+Integers are emitted without float conversion (clients must also preserve large
+integers). Cast NaN and infinity to VARCHAR before returning them as JSON.
+
+A signal's view appears after its first completed Parquet file; querying a
+signal that has never received data returns a missing-table error. New files
+appear on subsequent queries. Results are not snapshots across requests; late
+data can change a repeated query. Use an explicit `ORDER BY` for ordered results.
+
+Defaults: one concurrent query, a 10-second deadline, 256 MiB of DuckDB-managed
+memory, at most 500 returned rows, 16 KiB request bodies, and 1 MiB successful
+JSON responses. `truncated` means more than 500 result rows exist; it does not
+indicate an incomplete aggregation. There is no custom time-window or file-scan
+budget. Disk spill and automatic extension downloads are disabled. DuckDB's
+memory limit is not a total process memory cap; provision separately for
+ingestion and Go.
+
+DuckDB is configured to allow file reads only inside the local telemetry
+directory, disable other external access, and lock those settings. Keep only
+telemetry there, and do not allow untrusted users to write files or symlinks
+there. **This endpoint is for trusted read-key holders, not a hostile-SQL
+sandbox or a multi-tenant security boundary.** Use process/container isolation
+for that threat model.
+
+Invalid SQL/JSON returns `400`, wrong content type `415`, oversized bodies
+`413`, excess concurrency `429` with `Retry-After`, response-budget excess `422`,
+cancellation `408`, and deadline expiry `504`. Successful responses are JSON;
+errors are plain text except auth failures, which retain the OTLP protobuf
+`401` format. MCP and server-managed pagination are not implemented.
 
 ## Run
+
+Set `IngestKeys` and `ReadKeys` in `internal/config/config.go`'s `NewConfig` before building.
+Keys are source-configured for development only; do not commit production secrets.
+Empty key lists deny access. Read keys do not grant ingestion access.
+Building requires CGO and a C/C++ toolchain for embedded DuckDB.
 
 ```bash
 go build -o bin/otelake .
 ./bin/otelake
 ```
 
-Health: `curl localhost:4318/health` · Test data: `telemetrygen traces --otlp-http --otlp-insecure --otlp-endpoint localhost:4318`
+Health: `curl localhost:4318/health` (no authentication required).
+
+All three OTLP endpoints require a single `Authorization: Bearer <key>` header.
+Missing, malformed, or invalid credentials return `401` before the body is read.
+Multiple ingest keys can be configured to overlap during rotation.
+
+Test data (replace `<configured-ingest-key>` with a configured key):
+
+```bash
+telemetrygen traces --otlp-http --otlp-insecure --otlp-endpoint localhost:4318 \
+  --otlp-header 'Authorization="Bearer <configured-ingest-key>"'
+```
 
 ## Deployment
 
-Docker container with config file
+The Docker image builds with CGO on Debian and includes DuckDB's native runtime
+dependencies. Multi-platform releases build natively per target (with QEMU in
+CI). Configuration is currently compiled from `config.go`, not loaded from a file.
+When using local storage, mount a directory writable by the container's UID 10001
+and set `Storage.Local.Dir` to that mount path.
+
+Use TLS at a reverse proxy before exposing ingestion outside a trusted network,
+and prevent direct access to the backend port. Bearer authentication does not
+encrypt traffic or provide tenant isolation.
 
 ## Benchmarks
 

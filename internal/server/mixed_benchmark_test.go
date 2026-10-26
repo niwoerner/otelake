@@ -93,6 +93,7 @@ func TestMixedSignals(t *testing.T) {
 		}
 	}
 	cfg := config.NewConfig()
+	cfg.IngestKeys = []string{"benchmark-ingest-key"}
 	cfg.Storage.Local.Dir = t.TempDir()
 	s, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
@@ -180,6 +181,7 @@ func TestMixedSignals(t *testing.T) {
 			if err == nil {
 				req.Header.Set("Content-Type", "application/x-protobuf")
 				req.Header.Set("Content-Encoding", "gzip")
+				req.Header.Set("Authorization", "Bearer "+cfg.IngestKeys[0])
 				r.lag = time.Since(due)
 				var resp *http.Response
 				resp, err = client.Do(req)

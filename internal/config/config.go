@@ -1,5 +1,7 @@
 package config
 
+import "time"
+
 const (
 	defaultHTTPAddress  = ":4318"
 	defaultMaxBodyBytes = 67108864   // 64 MiB, the OTLP spec's recommended default
@@ -13,6 +15,18 @@ const (
 type Config struct {
 	HTTP    HTTPConfig
 	Storage StorageConfig
+	Query   QueryConfig
+	// Keys are configured in NewConfig for now. Empty lists deny access.
+	IngestKeys []string
+	// ReadKeys grant retrieval access, not ingestion access.
+	ReadKeys []string
+}
+
+// QueryConfig bounds local Parquet retrieval independently of ingestion.
+type QueryConfig struct {
+	Timeout          time.Duration
+	MaxConcurrent    int
+	MemoryLimitBytes int64
 }
 
 // HTTPConfig holds the OTLP/HTTP server settings
@@ -48,6 +62,8 @@ type S3Config struct {
 
 func NewConfig() *Config {
 	return &Config{
+		IngestKeys: []string{},
+		ReadKeys:   []string{},
 		HTTP: HTTPConfig{
 			Address:          defaultHTTPAddress,
 			MaxBodyBytes:     defaultMaxBodyBytes,
@@ -56,6 +72,11 @@ func NewConfig() *Config {
 		Storage: StorageConfig{
 			Type:  defaultStorageType,
 			Local: LocalConfig{Dir: defaultLocalDir},
+		},
+		Query: QueryConfig{
+			Timeout:          10 * time.Second,
+			MaxConcurrent:    1,
+			MemoryLimitBytes: 256 << 20,
 		},
 	}
 }

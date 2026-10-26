@@ -54,6 +54,7 @@ func TestHTTP(t *testing.T) {
 					inputBytes += len(d.Body)
 				}
 				cfg := config.NewConfig()
+				cfg.IngestKeys = []string{"benchmark-ingest-key"}
 				cfg.Storage.Local.Dir = t.TempDir()
 				s, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 				if err != nil {
@@ -134,6 +135,7 @@ func TestHTTP(t *testing.T) {
 								return
 							}
 							req.Header.Set("Content-Type", "application/x-protobuf")
+							req.Header.Set("Authorization", "Bearer "+cfg.IngestKeys[0])
 							sent := time.Now()
 							resp, err := client.Do(req)
 							code := 0

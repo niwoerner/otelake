@@ -1,18 +1,23 @@
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba AS build
+# Build on the target platform (via QEMU when needed) so CGO uses its native toolchain.
+FROM golang:1.26-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS build
 
-ARG TARGETOS TARGETARCH VERSION=dev COMMIT=none DATE=unknown
+ARG VERSION=dev COMMIT=none DATE=unknown
+RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
+RUN CGO_ENABLED=1 go build \
     -ldflags "-s -w -X main.version=$VERSION -X main.commit=$COMMIT -X main.date=$DATE" \
     -o /otelake .
 
-FROM alpine:latest@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
 
 ARG USER_UID=10001
-RUN apk upgrade --no-cache
+# DuckDB is embedded, but its prebuilt libraries still require glibc and libstdc++.
+RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 USER ${USER_UID}
 
 COPY --from=build /otelake /otelake

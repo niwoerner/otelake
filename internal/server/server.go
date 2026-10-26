@@ -15,6 +15,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/niwoerner/otelake/internal/batcher"
 	"github.com/niwoerner/otelake/internal/config"
+	"github.com/niwoerner/otelake/internal/query"
 	"github.com/niwoerner/otelake/internal/schemas"
 	"github.com/niwoerner/otelake/internal/storage"
 	"github.com/niwoerner/otelake/internal/writer"
@@ -24,10 +25,12 @@ import (
 var errBodyTooLarge = errors.New("decompressed body too large")
 
 type Server struct {
-	cfg    *config.Config
-	logger *slog.Logger
-	http   *http.Server
-	budget *semaphore.Weighted // bytes of requests in memory, see readBody
+	cfg       *config.Config
+	logger    *slog.Logger
+	http      *http.Server
+	budget    *semaphore.Weighted // bytes of requests in memory, see readBody
+	queries   *query.Engine
+	queryGate *semaphore.Weighted
 
 	spans   *batcher.Batcher
 	logs    *batcher.Batcher
@@ -45,6 +48,14 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		return nil, fmt.Errorf("creating storage: %w", err)
 	}
 
+	var queries *query.Engine
+	if cfg.Storage.Type == "local" {
+		queries, err = query.New(cfg.Storage.Local.Dir, cfg.Query)
+		if err != nil {
+			return nil, fmt.Errorf("creating query engine: %w", err)
+		}
+	}
+
 	// One batcher and file writer per signal: <signal>/hour=YYYYMMDDHH/<file>.parquet
 	newBatcher := func(signal string, schema *arrow.Schema, timeColumns ...string) *batcher.Batcher {
 		files := writer.New(bucket, schema, signal, timeColumns, "service_name")
@@ -52,12 +63,14 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 
 	s := &Server{
-		cfg:     cfg,
-		logger:  logger,
-		budget:  semaphore.NewWeighted(cfg.HTTP.MemoryLimitBytes),
-		spans:   newBatcher("spans", schemas.Spans, "start_time"),
-		logs:    newBatcher("logs", schemas.Logs, "time", "observed_time"),
-		metrics: newBatcher("metrics", schemas.Metrics, "time"),
+		cfg:       cfg,
+		logger:    logger,
+		budget:    semaphore.NewWeighted(cfg.HTTP.MemoryLimitBytes),
+		queries:   queries,
+		queryGate: semaphore.NewWeighted(int64(cfg.Query.MaxConcurrent)),
+		spans:     newBatcher("spans", schemas.Spans, "start_time"),
+		logs:      newBatcher("logs", schemas.Logs, "time", "observed_time"),
+		metrics:   newBatcher("metrics", schemas.Metrics, "time"),
 	}
 	s.http = &http.Server{Handler: s.routes()}
 	return s, nil
@@ -66,9 +79,10 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("POST /v1/traces", s.handleTraces)
-	mux.HandleFunc("POST /v1/metrics", s.handleMetrics)
-	mux.HandleFunc("POST /v1/logs", s.handleLogs)
+	mux.HandleFunc("POST /v1/traces", requireKey(s.cfg.IngestKeys, s.handleTraces))
+	mux.HandleFunc("POST /v1/metrics", requireKey(s.cfg.IngestKeys, s.handleMetrics))
+	mux.HandleFunc("POST /v1/logs", requireKey(s.cfg.IngestKeys, s.handleLogs))
+	mux.HandleFunc("POST /api/query", requireKey(s.cfg.ReadKeys, s.handleQuery))
 	return mux
 }
 
@@ -105,6 +119,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		wg.Go(func() { errs[i] = b.Close(ctx) })
 	}
 	wg.Wait()
+	if s.queries != nil {
+		errs = append(errs, s.queries.Close())
+	}
 	return errors.Join(append(errs, err)...)
 }
 
